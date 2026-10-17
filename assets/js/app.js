@@ -2023,7 +2023,10 @@
     dirty.add(job);
     if (rafPending) return;
     rafPending = true;
-    requestAnimationFrame(function () { rafPending = false; dirty.forEach(paint); dirty.clear(); });
+    var flush = function () { if (!rafPending) return; rafPending = false; dirty.forEach(paint); dirty.clear(); };
+    // En una pestaña en segundo plano el navegador pausa los fotogramas: se usa un temporizador de respaldo.
+    if (document.hidden) setTimeout(flush, 250);
+    else { requestAnimationFrame(flush); setTimeout(flush, 500); }
   }
 
   function enqueue(job) {
