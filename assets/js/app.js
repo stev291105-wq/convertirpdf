@@ -5,7 +5,8 @@
      0. DATOS DE MARCA Y AJUSTES (el dueño puede editarlos aquí)
      =========================================================== */
   window.__BRAND__ = {
-    name: "ConvertiLocal",
+    name: "ConvertirPDF",
+    slug: "convertirpdf",
     ads: {
       modalOnDownload: true,      // Pop-up publicitario tras pulsar «Descargar»
       modalDelayMs: 350,          // Se abre DESPUÉS de iniciar la descarga (nunca la bloquea)
@@ -662,13 +663,13 @@
         '<Relationship Id="rId1" Type="' + NS_OFFREL + '/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>');
       var clr = function (tag, hex) { return "<a:" + tag + '><a:srgbClr val="' + hex + '"/></a:' + tag + ">"; };
       var fill3 = '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>';
-      zip.file("ppt/theme/theme1.xml", XML_HEAD + '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="ConvertiLocal"><a:themeElements>' +
-        '<a:clrScheme name="ConvertiLocal"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>' +
+      zip.file("ppt/theme/theme1.xml", XML_HEAD + '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="ConvertirPDF"><a:themeElements>' +
+        '<a:clrScheme name="ConvertirPDF"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>' +
         clr("dk2", "44546A") + clr("lt2", "E7E6E6") + clr("accent1", "4472C4") + clr("accent2", "ED7D31") + clr("accent3", "A5A5A5") +
         clr("accent4", "FFC000") + clr("accent5", "5B9BD5") + clr("accent6", "70AD47") + clr("hlink", "0563C1") + clr("folHlink", "954F72") + "</a:clrScheme>" +
-        '<a:fontScheme name="ConvertiLocal"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>' +
+        '<a:fontScheme name="ConvertirPDF"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>' +
         '<a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme>' +
-        '<a:fmtScheme name="ConvertiLocal"><a:fillStyleLst>' + fill3 + fill3 + fill3 + "</a:fillStyleLst>" +
+        '<a:fmtScheme name="ConvertirPDF"><a:fillStyleLst>' + fill3 + fill3 + fill3 + "</a:fillStyleLst>" +
         '<a:lnStyleLst><a:ln w="6350">' + fill3 + '</a:ln><a:ln w="12700">' + fill3 + '</a:ln><a:ln w="19050">' + fill3 + "</a:ln></a:lnStyleLst>" +
         "<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>" +
         "<a:bgFillStyleLst>" + fill3 + fill3 + fill3 + "</a:bgFillStyleLst></a:fmtScheme></a:themeElements><a:objectDefaults/><a:extraClrSchemeLst/></a:theme>");
@@ -1919,21 +1920,29 @@
   }
 
   /* ===========================================================
-     14. INTERFAZ: REJILLA, COLA Y ESTADOS
+     14. INTERFAZ: LISTA DE ARCHIVOS, BOTÓN «CONVERTIR A» Y COLA
+     -----------------------------------------------------------
+     Flujo único y simple: el usuario sube archivos de cualquier tipo →
+     aparece el botón «Convertir a» con la lista de formatos posibles para
+     lo que subió → elige uno y se convierte todo → descarga.
      =========================================================== */
   var jobs = [], seq = 0, running = 0, batchActive = false;
-  var tbody, toolCard, bulkBar, gridWrap;
+  var listEl, toolCard, convertBar;
 
-  /* Configuración de la página (cada herramienta fija su formato de salida preferido) */
+  /* Configuración de la página (cada herramienta propone su formato) */
   var PAGE = { target: null }, dzTitleHTML = "";
-  function preferredTarget(kind) {
-    var list = targetsFor(kind);
-    if (PAGE.target && list.indexOf(PAGE.target) >= 0) return PAGE.target;
-    var d = DEFAULT_TARGET[kind];
-    return list.indexOf(d) >= 0 ? d : list[0];
-  }
+  var ORDER = ["pdf", "docx", "xlsx", "pptx", "jpg", "png", "webp"];
+  var TARGET_NAME = { pdf: "PDF", docx: "Word", xlsx: "Excel", pptx: "PowerPoint", png: "PNG", jpg: "JPG", webp: "WebP" };
+  var TARGET_DESC = {
+    pdf: "Listo para enviar o imprimir", docx: "Documento editable (.docx)", xlsx: "Hoja de cálculo (.xlsx)",
+    pptx: "Presentación (.pptx)", jpg: "Imagen liviana, ideal para fotos", png: "Imagen sin pérdida, con transparencia",
+    webp: "Imagen moderna y muy liviana"
+  };
+  var TAG = { pdf: "PDF", docx: "DOC", xlsx: "XLS", pptx: "PPT", png: "PNG", jpg: "JPG", webp: "WEBP" };
 
   function limitFor(kind) { return kind === "pdf" ? BRAND.limits.pdf : IMAGE_KINDS[kind] ? BRAND.limits.image : BRAND.limits.office; }
+  function isBusy(j) { return j.state === "queued" || j.state === "working"; }
+  function anyBusy() { return running > 0 || jobs.some(isBusy); }
 
   function addFiles(list) {
     var files = Array.prototype.slice.call(list || []);
@@ -1947,72 +1956,71 @@
         if (!d.kind) { toast("error", d.encrypted ? "«" + f.name + "» está protegido" : "«" + f.name + "» no es compatible", d.reason); return; }
         if (!f.size) { toast("error", "«" + f.name + "» está vacío", "El archivo no tiene contenido."); return; }
         if (f.size > limitFor(d.kind)) { toast("error", "«" + f.name + "» es demasiado grande", "El máximo para este tipo es ~" + fmtBytes(limitFor(d.kind)) + " para que tu navegador no se quede sin memoria."); return; }
-        var job = { id: ++seq, file: f, kind: d.kind, target: preferredTarget(d.kind), state: "ready", progress: 0, label: "Listo para convertir", result: null, error: null, password: "" };
+        var job = { id: ++seq, file: f, kind: d.kind, target: null, state: "ready", progress: 0, label: "", result: null, error: null, password: "", skipMsg: "" };
         jobs.push(job);
-        tbody.appendChild(rowFor(job));
+        listEl.appendChild(rowFor(job));
         added++;
       });
-      if (added) toast("info", added === 1 ? "Archivo listo" : added + " archivos listos", "Elige el formato y pulsa «Convertir».", 3500);
       refreshChrome();
+      if (added) {
+        var b = $("[data-convert-main]:not([hidden])") || $("[data-convert-toggle]");
+        if (b && !b.disabled) try { b.focus({ preventScroll: true }); } catch (e) { /* sin importancia */ }
+      }
     });
   }
 
   function rowFor(job) {
-    var tr = document.createElement("tr");
-    tr.dataset.id = job.id;
-    var opts = targetsFor(job.kind).map(function (t) {
-      return '<option value="' + t + '"' + (t === job.target ? " selected" : "") + ">" + TARGET_LABEL[t] + "</option>";
-    }).join("");
-    tr.innerHTML =
-      '<td class="c-icon"><span class="ficon ficon--' + job.kind + '" aria-label="' + KIND_LABEL[job.kind] + '">' + KIND_LABEL[job.kind] + "</span></td>" +
-      '<td class="c-name"><div class="fname">' + escHTML(job.file.name) + '</div><div class="fnote" data-note></div><div class="pw-box" data-pw hidden>' +
-        '<input type="password" placeholder="Contraseña del PDF" autocomplete="off" aria-label="Contraseña del PDF">' +
-        '<button class="btn btn--sm" type="button" data-unlock>Desbloquear</button></div></td>' +
-      '<td class="c-size"><span class="fsize">' + fmtBytes(job.file.size) + "</span></td>" +
-      '<td class="c-target"><select class="select" data-target aria-label="Formato de salida para ' + escHTML(job.file.name) + '">' + opts + "</select></td>" +
-      '<td class="c-progress"><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div><div class="pct" data-pct></div></td>' +
-      '<td class="c-action"><div class="actions"><button class="btn btn--primary btn--sm" type="button" data-action></button></div></td>' +
-      '<td class="c-rm"><button class="icon-btn" type="button" data-remove aria-label="Quitar ' + escHTML(job.file.name) + '">' + ICON_X + "</button></td>";
-    job.el = tr;
+    var li = document.createElement("li");
+    li.className = "file-row";
+    li.dataset.id = job.id;
+    li.innerHTML =
+      '<span class="c-icon"><span class="ficon ficon--' + job.kind + '" aria-label="' + KIND_LABEL[job.kind] + '">' + KIND_LABEL[job.kind] + "</span></span>" +
+      '<div class="c-name"><div class="fname">' + escHTML(job.file.name) + '</div><div class="fnote" data-note></div>' +
+        '<div class="pw-box" data-pw hidden><input type="password" placeholder="Contraseña del PDF" autocomplete="off" aria-label="Contraseña del PDF">' +
+        '<button class="btn btn--ink btn--sm" type="button" data-unlock>Desbloquear</button></div></div>' +
+      '<span class="c-size fsize">' + fmtBytes(job.file.size) + "</span>" +
+      '<div class="c-progress"><div class="progress" role="progressbar" aria-label="Progreso" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div><div class="pct" data-pct></div></div>' +
+      '<div class="c-action row-action"><button class="btn btn--sm" type="button" data-action hidden></button></div>' +
+      '<span class="c-rm"><button class="icon-btn" type="button" data-remove aria-label="Quitar ' + escHTML(job.file.name) + '">' + ICON_X + "</button></span>";
+    job.el = li;
     paint(job);
-    return tr;
+    return li;
   }
 
-  var ICON_CONVERT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h12l-3.5-3.5M19 15H7l3.5 3.5"/></svg>';
   var ICON_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>';
 
   /* Pinta el estado de una fila (único sitio que toca su DOM). */
   function paint(job) {
-    var tr = job.el;
-    if (!tr) return;
-    var busy = job.state === "queued" || job.state === "working";
-    tr.className = "row--" + job.state;
-    var sel = $("[data-target]", tr), btn = $("[data-action]", tr), rm = $("[data-remove]", tr);
-    var bar = $(".progress", tr), pct = $("[data-pct]", tr), note = $("[data-note]", tr), pw = $("[data-pw]", tr);
-    sel.disabled = busy;
+    var li = job.el;
+    if (!li) return;
+    var busy = isBusy(job);
+    li.className = "file-row row--" + job.state;
+    var btn = $("[data-action]", li), rm = $("[data-remove]", li);
+    var bar = $(".progress", li), pct = $("[data-pct]", li), note = $("[data-note]", li), pw = $("[data-pw]", li);
     rm.disabled = busy;
-    btn.disabled = busy;
     var p = Math.round((job.progress || 0) * 100);
-    bar.firstElementChild.style.width = (job.state === "done" ? 100 : job.state === "error" ? 100 : p) + "%";
+    var full = job.state === "done" || job.state === "error" || job.state === "skip";
+    bar.firstElementChild.style.width = (full ? 100 : p) + "%";
     bar.setAttribute("aria-valuenow", job.state === "done" ? 100 : p);
+    var to = job.target ? TARGET_NAME[job.target] : "";
     if (job.state === "working") pct.textContent = p + " % · " + (job.label || "Convirtiendo");
-    else if (job.state === "queued") pct.textContent = "En cola…";
-    else if (job.state === "done") pct.textContent = "100 % · Listo";
-    else if (job.state === "error") pct.textContent = "Error";
-    else pct.textContent = "";
+    else if (job.state === "queued") pct.textContent = "En cola · a " + to;
+    else if (job.state === "done") pct.textContent = "Listo";
+    else if (job.state === "error") pct.textContent = "No se pudo convertir";
+    else if (job.state === "skip") pct.textContent = "Omitido";
+    else pct.textContent = "Listo para convertir";
+    btn.hidden = !(job.state === "done" || job.state === "error");
     if (job.state === "done") {
       btn.className = "btn btn--ok btn--sm";
       btn.innerHTML = ICON_DOWN + "Descargar <span>(" + fmtBytes(job.result.blob.size) + ")</span>";
       note.className = "fnote is-ok"; note.textContent = "→ " + job.result.name + (job.result.note ? " · " + job.result.note : "");
     } else if (job.state === "error") {
-      btn.className = "btn btn--sm"; btn.innerHTML = "Reintentar";
+      btn.className = "btn btn--soft btn--sm"; btn.textContent = "Reintentar";
       note.className = "fnote is-err"; note.textContent = job.error ? job.error.title + ". " + job.error.detail : "";
-    } else if (busy) {
-      btn.className = "btn btn--primary btn--sm"; btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>' + (job.state === "queued" ? "En cola" : "Convirtiendo…");
-      note.className = "fnote"; note.textContent = "";
+    } else if (job.state === "skip") {
+      note.className = "fnote"; note.textContent = job.skipMsg;
     } else {
-      btn.className = "btn btn--primary btn--sm"; btn.innerHTML = ICON_CONVERT + "Convertir";
-      note.className = "fnote"; note.textContent = job.password ? "🔓 Contraseña lista" : "";
+      note.className = "fnote"; note.textContent = job.password && job.state === "ready" ? "🔓 Contraseña lista" : "";
     }
     pw.hidden = !(job.state === "error" && job.error && job.error.code === "password");
   }
@@ -2030,7 +2038,7 @@
   }
 
   function enqueue(job) {
-    if (job.state === "queued" || job.state === "working") return;
+    if (isBusy(job)) return;
     job.state = "queued"; job.progress = 0; job.result = null; job.error = null;
     paint(job);
     pump();
@@ -2046,7 +2054,8 @@
       batchActive = false;
       var ok = jobs.filter(function (j) { return j.state === "done"; }).length;
       var bad = jobs.filter(function (j) { return j.state === "error"; }).length;
-      if (ok || bad) toast(bad ? "error" : "ok", bad ? "Conversión terminada con avisos" : "¡Todo convertido!", ok + " listo(s)" + (bad ? " · " + bad + " con error" : "") + ". Puedes descargarlos uno a uno o en ZIP.");
+      if (ok > 1 && !bad) toast("ok", "¡Listo! " + ok + " archivos convertidos", "Descárgalos uno a uno o todos juntos en un ZIP.");
+      else if (bad) toast("error", "Conversión terminada con avisos", ok + " listo(s) · " + bad + " con error. Revisa el mensaje de cada archivo.");
     }
     refreshChrome();
   }
@@ -2056,7 +2065,7 @@
     paint(job);
     var last = 0;
     var report = function (f, label) {
-      if (!jobs.includes(job)) return;
+      if (jobs.indexOf(job) < 0) return;
       if (f >= last) { job.progress = Math.min(0.99, f); last = f; }
       if (label) job.label = label;
       schedulePaint(job);
@@ -2070,43 +2079,125 @@
       toast("error", job.error.title, "«" + job.file.name + "»: " + job.error.detail);
     }).then(function () {
       running--;
-      if (jobs.includes(job)) paint(job);
+      if (jobs.indexOf(job) >= 0) paint(job);
       pump();
     });
   }
 
   function removeJob(job) {
-    if (job.state === "queued" || job.state === "working") return;
+    if (isBusy(job)) return;
     jobs = jobs.filter(function (j) { return j !== job; });
     if (job.el) job.el.remove();
     refreshChrome();
   }
 
-  /* Estado de la barra masiva y de la tarjeta según la lista. */
+  /* Formatos posibles para los archivos cargados (con cuántos sirve cada uno). */
+  function convertOptions() {
+    var counts = {};
+    jobs.forEach(function (j) { targetsFor(j.kind).forEach(function (t) { counts[t] = (counts[t] || 0) + 1; }); });
+    var opts = ORDER.filter(function (t) { return counts[t]; }).map(function (t) { return { t: t, n: counts[t] }; });
+    if (PAGE.target) opts.sort(function (a, b) { return (b.t === PAGE.target) - (a.t === PAGE.target); });
+    return opts;
+  }
+  function imageJobs() { return jobs.filter(function (j) { return IMAGE_KINDS[j.kind]; }); }
+
+  function renderConvertList() {
+    var host = $("[data-convert-list]");
+    if (!host) return;
+    var opts = convertOptions(), total = jobs.length, html = "<h4>Convertir a</h4>";
+    opts.forEach(function (o) {
+      var extra = o.n < total ? " · sirve para " + o.n + " de " + total + " archivos" : "";
+      html += '<button class="convert-opt" type="button" role="menuitem" data-to="' + o.t + '">' +
+        '<span class="ticon ticon--' + o.t + '">' + TAG[o.t] + "</span>" +
+        "<span>" + TARGET_NAME[o.t] + "<small>" + TARGET_DESC[o.t] + extra + "</small></span>" +
+        (o.t === PAGE.target ? '<span class="pill-sun" style="margin-left:auto">Recomendado</span>' : "") + "</button>";
+    });
+    var imgs = imageJobs().length;
+    if (imgs >= 2) {
+      html += "<h4>Varias imágenes</h4>" +
+        '<button class="convert-opt" type="button" role="menuitem" data-merge><span class="ticon ticon--pdf">PDF</span>' +
+        "<span>Un solo PDF con todas las imágenes<small>" + imgs + " imágenes, en el orden de la lista</small></span></button>";
+    }
+    host.innerHTML = html;
+  }
+
+  function setMenuOpen(open) {
+    var host = $("[data-convert-list]"), toggle = $("[data-convert-toggle]");
+    if (!host || !toggle) return;
+    if (open) renderConvertList();
+    host.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) { var first = $(".convert-opt", host); if (first) first.focus(); }
+  }
+
+  /* Convierte TODOS los archivos al formato elegido (los que no pueden, se omiten con un aviso). */
+  function convertAllTo(t) {
+    setMenuOpen(false);
+    var any = false;
+    jobs.forEach(function (j) {
+      if (isBusy(j)) return;
+      if (j.kind === t) { j.state = "skip"; j.skipMsg = "Ya es un archivo " + TARGET_NAME[t] + "."; paint(j); return; }
+      if (targetsFor(j.kind).indexOf(t) < 0) { j.state = "skip"; j.skipMsg = "Un archivo " + KIND_LABEL[j.kind] + " no se puede convertir a " + TARGET_NAME[t] + "."; paint(j); return; }
+      if (j.error && j.error.code === "password" && !j.password) { j.target = t; paint(j); return; }
+      j.target = t; any = true;
+      j.state = "ready";
+      enqueue(j);
+    });
+    if (any) batchActive = true;
+    refreshChrome();
+  }
+
+  function mergeImages() {
+    setMenuOpen(false);
+    var imgs = imageJobs();
+    if (imgs.length < 2) return;
+    var main = $("[data-convert-toggle]");
+    convertBar.dataset.merging = "1";
+    refreshChrome();
+    var label = $("[data-convert-label]");
+    imagesToPdf(imgs.map(function (j) { return j.file; }), function (f) {
+      if (label) label.textContent = "Uniendo… " + Math.round(f * 100) + " %";
+    }).then(function (blob) {
+      var name = "imagenes-unidas.pdf";
+      toast("ok", "PDF creado con " + imgs.length + " imágenes", "Se está descargando «" + name + "» (" + fmtBytes(blob.size) + ").");
+      saveBlob(blob, name);
+      afterDownload("Descargando «" + name + "»");
+    }).catch(function (e) {
+      var h = humanize(e, "imagen"); toast("error", h.title, h.detail);
+    }).then(function () { delete convertBar.dataset.merging; refreshChrome(); if (main) main.focus(); });
+  }
+
+  /* Estado de la barra «Convertir a» y de la tarjeta según la lista. */
   function refreshChrome() {
     var has = jobs.length > 0;
     toolCard.classList.toggle("has-files", has);
-    bulkBar.hidden = !has; gridWrap.hidden = !has;
+    convertBar.hidden = !has;
     $("[data-dz-title]").innerHTML = has ? "Añadir más archivos" : dzTitleHTML;
-    var busy = running > 0 || jobs.some(function (j) { return j.state === "queued"; });
+    if (!has) return;
+    var busy = anyBusy() || convertBar.dataset.merging === "1";
     var done = jobs.filter(function (j) { return j.state === "done"; });
-    var pending = jobs.filter(function (j) { return j.state === "ready" || j.state === "error"; });
-    var images = jobs.filter(function (j) { return IMAGE_KINDS[j.kind]; });
-    $("[data-convert-all]").disabled = busy || !pending.length;
-    $("[data-bulk-target]").disabled = busy;
+    $("[data-files-count]").textContent = jobs.length === 1 ? "1 archivo" : jobs.length + " archivos";
     $("[data-clear-all]").disabled = busy;
-    $("[data-zip-all]").disabled = busy || !done.length;
-    var merge = $("[data-merge-images]");
-    merge.hidden = images.length < 2; merge.disabled = busy;
-    $("[data-bulk-count]").textContent = has ? done.length + "/" + jobs.length + " listos" : "";
-    // Opciones del selector masivo: solo formatos que admite al menos un archivo
-    var bulk = $("[data-bulk-target]"), current = bulk.value, seen = {};
-    jobs.forEach(function (j) { targetsFor(j.kind).forEach(function (t) { seen[t] = 1; }); });
-    var order = ["pdf", "docx", "xlsx", "pptx", "png", "jpg", "webp"];
-    var html = '<option value="">Elegir…</option>' + order.filter(function (t) { return seen[t]; }).map(function (t) {
-      return '<option value="' + t + '">' + TARGET_LABEL[t] + "</option>";
-    }).join("");
-    if (bulk.innerHTML !== html) { bulk.innerHTML = html; bulk.value = seen[current] ? current : ""; }
+    var zip = $("[data-zip-all]");
+    zip.hidden = done.length < 2; zip.disabled = busy;
+    var opts = convertOptions();
+    var main = $("[data-convert-main]"), toggle = $("[data-convert-toggle]"), label = $("[data-convert-label]");
+    var pageOk = PAGE.target && opts.some(function (o) { return o.t === PAGE.target; });
+    main.hidden = !pageOk;
+    toggle.classList.toggle("btn--caret", !!pageOk);
+    toggle.setAttribute("aria-label", pageOk ? "Elegir otro formato" : "Convertir a");
+    main.disabled = toggle.disabled = busy || !opts.length;
+    if (busy) {
+      if (convertBar.dataset.merging !== "1") {
+        if (pageOk) main.innerHTML = '<span class="spinner" aria-hidden="true"></span>Convirtiendo…';
+        else label.textContent = "Convirtiendo…";
+      }
+    } else {
+      if (pageOk) main.textContent = "Convertir a " + TARGET_NAME[PAGE.target];
+      label.textContent = pageOk ? "" : "Convertir a";
+    }
+    $("[data-convert-caret-text]").hidden = !!pageOk;
+    if (!$("[data-convert-list]").hidden) renderConvertList();
   }
 
   /* ===========================================================
@@ -2157,7 +2248,7 @@
      16. EVENTOS DE LA HERRAMIENTA
      =========================================================== */
   function initTool() {
-    toolCard = $("[data-tool]"); tbody = $("[data-rows]"); bulkBar = $("[data-bulk]"); gridWrap = $("[data-grid-wrap]");
+    toolCard = $("[data-tool]"); listEl = $("[data-rows]"); convertBar = $("[data-convert-bar]");
     var dz = $("[data-dropzone]"), input = $("[data-file-input]");
     PAGE.target = toolCard.dataset.target || null;
     dzTitleHTML = $("[data-dz-title]").innerHTML;
@@ -2188,17 +2279,8 @@
       if (items.length) { e.preventDefault(); addFiles(items); }
     });
 
-    // Delegación de eventos en la rejilla
-    tbody.addEventListener("change", function (e) {
-      var sel = e.target.closest("[data-target]");
-      if (!sel) return;
-      var job = jobOf(sel);
-      if (!job || job.state === "queued" || job.state === "working") return;
-      job.target = sel.value;
-      if (job.state === "done" || job.state === "error") { job.state = "ready"; job.result = null; job.error = null; job.progress = 0; }
-      paint(job); refreshChrome();
-    });
-    tbody.addEventListener("click", function (e) {
+    // Lista de archivos: descargar, reintentar, quitar, desbloquear
+    listEl.addEventListener("click", function (e) {
       var job = jobOf(e.target);
       if (!job) return;
       if (e.target.closest("[data-remove]")) return removeJob(job);
@@ -2207,43 +2289,44 @@
         if (!inp.value) { inp.focus(); return; }
         job.password = inp.value; inp.value = "";
         job.state = "ready"; job.error = null;
-        return enqueue(job);
+        if (job.target) { batchActive = true; enqueue(job); } else paint(job);
+        return;
       }
       if (e.target.closest("[data-action]")) {
         if (job.state === "done") {
           saveBlob(job.result.blob, job.result.name);
           afterDownload("Descargando «" + job.result.name + "»");
-        } else if (job.state === "ready" || job.state === "error") {
+        } else if (job.state === "error" && job.target) {
           enqueue(job);
         }
       }
     });
-    tbody.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" && e.target.matches("[data-pw] input")) { e.preventDefault(); $("[data-unlock]", e.target.closest("tr")).click(); }
+    listEl.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && e.target.matches("[data-pw] input")) { e.preventDefault(); $("[data-unlock]", e.target.closest("[data-id]")).click(); }
     });
 
-    // Acciones masivas
-    $("[data-bulk-target]").addEventListener("change", function (e) {
-      var t = e.target.value;
-      if (!t) return;
-      var applied = 0, skipped = 0;
-      jobs.forEach(function (j) {
-        if (j.state === "queued" || j.state === "working") return;
-        if (targetsFor(j.kind).indexOf(t) >= 0 && j.kind !== t) {
-          j.target = t; $("[data-target]", j.el).value = t;
-          if (j.state === "done" || j.state === "error") { j.state = "ready"; j.result = null; j.error = null; j.progress = 0; }
-          paint(j); applied++;
-        } else skipped++;
-      });
-      toast("info", "Formato " + TARGET_LABEL[t] + " aplicado a " + applied + " archivo(s)", skipped ? skipped + " no admite(n) ese formato y se mantienen como estaban." : "", 4000);
-      refreshChrome();
+    // Botón «Convertir a» y su lista
+    $("[data-convert-main]").addEventListener("click", function () { if (PAGE.target) convertAllTo(PAGE.target); });
+    $("[data-convert-toggle]").addEventListener("click", function () { setMenuOpen($("[data-convert-list]").hidden); });
+    $("[data-convert-list]").addEventListener("click", function (e) {
+      var opt = e.target.closest("[data-to]");
+      if (opt) return convertAllTo(opt.dataset.to);
+      if (e.target.closest("[data-merge]")) mergeImages();
     });
-    $("[data-convert-all]").addEventListener("click", function () {
-      var list = jobs.filter(function (j) { return j.state === "ready" || j.state === "error"; });
-      if (!list.length) return;
-      batchActive = true;
-      list.forEach(function (j) { if (!(j.error && j.error.code === "password" && !j.password)) enqueue(j); });
+    $("[data-convert-list]").addEventListener("keydown", function (e) {
+      var items = $$(".convert-opt", e.currentTarget), i = items.indexOf(document.activeElement);
+      if (e.key === "ArrowDown") { e.preventDefault(); (items[i + 1] || items[0]).focus(); }
+      if (e.key === "ArrowUp") { e.preventDefault(); (items[i - 1] || items[items.length - 1]).focus(); }
     });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && !$("[data-convert-list]").hidden) { setMenuOpen(false); $("[data-convert-toggle]").focus(); }
+    });
+    document.addEventListener("click", function (e) {
+      var host = $("[data-convert-list]");
+      if (host.hidden || e.target.closest(".convert-menu")) return;
+      setMenuOpen(false);
+    });
+
     $("[data-zip-all]").addEventListener("click", function () {
       var done = jobs.filter(function (j) { return j.state === "done"; });
       if (!done.length) return;
@@ -2252,40 +2335,24 @@
       blobsToZip(done.map(function (j) { return { blob: j.result.blob, name: j.result.name }; }), function (f) {
         btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>Preparando ZIP… ' + Math.round(f * 100) + " %";
       }).then(function (zip) {
-        saveBlob(zip, BRAND.name + "-" + new Date().toISOString().slice(0, 10) + ".zip");
-        afterDownload("Descargando " + done.length + " archivo(s) en ZIP");
+        saveBlob(zip, BRAND.slug + "-" + new Date().toISOString().slice(0, 10) + ".zip");
+        afterDownload("Descargando " + done.length + " archivos en un ZIP");
       }).catch(function (e) {
         console.warn(e); toast("error", "No se pudo crear el ZIP", "Prueba a descargar los archivos uno por uno.");
       }).then(function () { btn.innerHTML = old; refreshChrome(); });
     });
-    $("[data-merge-images]").addEventListener("click", function () {
-      var imgs = jobs.filter(function (j) { return IMAGE_KINDS[j.kind]; });
-      if (imgs.length < 2) return;
-      var btn = this, old = btn.innerHTML;
-      btn.disabled = true; btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>Uniendo…';
-      $("[data-convert-all]").disabled = true;
-      imagesToPdf(imgs.map(function (j) { return j.file; }), function (f) {
-        btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>Uniendo… ' + Math.round(f * 100) + " %";
-      }).then(function (blob) {
-        var name = "imagenes-unidas.pdf";
-        toast("ok", "PDF creado con " + imgs.length + " imágenes", "Se está descargando «" + name + "» (" + fmtBytes(blob.size) + ").");
-        saveBlob(blob, name);
-        afterDownload("Descargando «" + name + "»");
-      }).catch(function (e) {
-        var h = humanize(e, "imagen"); toast("error", h.title, h.detail);
-      }).then(function () { btn.innerHTML = old; refreshChrome(); });
-    });
     $("[data-clear-all]").addEventListener("click", function () {
-      if (running) return;
+      if (anyBusy()) return;
       jobs.forEach(function (j) { if (j.el) j.el.remove(); });
       jobs = [];
+      setMenuOpen(false);
       refreshChrome();
     });
   }
   function jobOf(el) {
-    var tr = el.closest && el.closest("tr[data-id]");
-    if (!tr) return null;
-    var id = +tr.dataset.id;
+    var row = el.closest && el.closest("[data-id]");
+    if (!row) return null;
+    var id = +row.dataset.id;
     return jobs.filter(function (j) { return j.id === id; })[0] || null;
   }
 
