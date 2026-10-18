@@ -215,6 +215,14 @@
         });
       });
     },
+    pdflib: function () {
+      return once("pdflib", function () {
+        return loadScript(VENDOR + "pdf-lib.min.js").then(function () {
+          if (!window.PDFLib || !window.PDFLib.PDFDocument) throw new Error("load PDFLib");
+          return window.PDFLib;
+        });
+      });
+    },
     xlsx: function () {
       return once("xlsx", function () {
         return loadScript(VENDOR + "xlsx.core.min.js").then(function () {
@@ -1954,16 +1962,19 @@
       res.forEach(function (r) {
         var f = r.file, d = r.det;
         if (!d.kind) { toast("error", d.encrypted ? "«" + f.name + "» está protegido" : "«" + f.name + "» no es compatible", d.reason); return; }
+        if (MODE === "merge" && d.kind !== "pdf") { toast("error", "«" + f.name + "» no es un PDF", "Para unir solo se aceptan PDF. Para mezclar imágenes o Word usa «Crear PDF»."); return; }
         if (!f.size) { toast("error", "«" + f.name + "» está vacío", "El archivo no tiene contenido."); return; }
         if (f.size > limitFor(d.kind)) { toast("error", "«" + f.name + "» es demasiado grande", "El máximo para este tipo es ~" + fmtBytes(limitFor(d.kind)) + " para que tu navegador no se quede sin memoria."); return; }
         var job = { id: ++seq, file: f, kind: d.kind, target: null, state: "ready", progress: 0, label: "", result: null, error: null, password: "", skipMsg: "" };
         jobs.push(job);
         listEl.appendChild(rowFor(job));
+        mergeResult = null;
         added++;
       });
+      if (MODE !== "convert") jobs.forEach(paint);
       refreshChrome();
       if (added) {
-        var b = $("[data-convert-main]:not([hidden])") || $("[data-convert-toggle]");
+        var b = $("[data-merge-run]:not([hidden])") || $("[data-convert-main]:not([hidden])") || $("[data-convert-toggle]");
         if (b && !b.disabled) try { b.focus({ preventScroll: true }); } catch (e) { /* sin importancia */ }
       }
     });
@@ -1980,13 +1991,17 @@
         '<button class="btn btn--ink btn--sm" type="button" data-unlock>Desbloquear</button></div></div>' +
       '<span class="c-size fsize">' + fmtBytes(job.file.size) + "</span>" +
       '<div class="c-progress"><div class="progress" role="progressbar" aria-label="Progreso" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div><div class="pct" data-pct></div></div>' +
-      '<div class="c-action row-action"><button class="btn btn--sm" type="button" data-action hidden></button></div>' +
+      '<div class="c-action row-action">' + (MODE !== "convert"
+        ? '<span class="order-btns"><button class="icon-btn" type="button" data-up aria-label="Subir ' + escHTML(job.file.name) + '">' + ICON_UP + '</button><button class="icon-btn" type="button" data-down aria-label="Bajar ' + escHTML(job.file.name) + '">' + ICON_DN + "</button></span>"
+        : '<button class="btn btn--sm" type="button" data-action hidden></button>') + "</div>" +
       '<span class="c-rm"><button class="icon-btn" type="button" data-remove aria-label="Quitar ' + escHTML(job.file.name) + '">' + ICON_X + "</button></span>";
     job.el = li;
     paint(job);
     return li;
   }
 
+  var ICON_UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>';
+  var ICON_DN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
   var ICON_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>';
 
   /* Pinta el estado de una fila (único sitio que toca su DOM). */
@@ -2009,6 +2024,7 @@
     else if (job.state === "error") pct.textContent = "No se pudo convertir";
     else if (job.state === "skip") pct.textContent = "Omitido";
     else pct.textContent = "Listo para convertir";
+    if (MODE !== "convert") return paintMergeRow(job, pct, note, pw, busy);
     btn.hidden = !(job.state === "done" || job.state === "error");
     if (job.state === "done") {
       btn.className = "btn btn--ok btn--sm";
@@ -2023,6 +2039,21 @@
       note.className = "fnote"; note.textContent = job.password && job.state === "ready" ? "🔓 Contraseña lista" : "";
     }
     pw.hidden = !(job.state === "error" && job.error && job.error.code === "password");
+  }
+
+  function paintMergeRow(job, pct, note, pw, busy) {
+    var pos = jobs.indexOf(job);
+    var up = $("[data-up]", job.el), dn = $("[data-down]", job.el);
+    up.disabled = busy || anyBusy() || pos <= 0; dn.disabled = busy || anyBusy() || pos >= jobs.length - 1;
+    var p = Math.round((job.progress || 0) * 100);
+    if (job.state === "working") pct.textContent = p + " % · " + (job.label || "Procesando");
+    else if (job.state === "queued") pct.textContent = "En espera";
+    else if (job.state === "done") pct.textContent = "Añadido · " + job.pages + (job.pages === 1 ? " página" : " páginas");
+    else if (job.state === "error") pct.textContent = "No se pudo añadir";
+    else pct.textContent = "Posición " + (pos + 1);
+    if (job.state === "error") { note.className = "fnote is-err"; note.textContent = job.error ? job.error.title + ". " + job.error.detail : ""; }
+    else { note.className = "fnote"; note.textContent = job.kind === "pdf" ? "" : "Se convertirá a PDF antes de unirlo"; }
+    pw.hidden = true;
   }
 
   /* Actualización de progreso agrupada por fotograma (no satura el navegador). */
@@ -2088,6 +2119,8 @@
     if (isBusy(job)) return;
     jobs = jobs.filter(function (j) { return j !== job; });
     if (job.el) job.el.remove();
+    mergeResult = null;
+    if (MODE !== "convert") jobs.forEach(paint);
     refreshChrome();
   }
 
@@ -2180,6 +2213,7 @@
     $("[data-clear-all]").disabled = busy;
     var zip = $("[data-zip-all]");
     zip.hidden = done.length < 2; zip.disabled = busy;
+    if (MODE !== "convert") { refreshMergeChrome(busy); return; }
     var opts = convertOptions();
     var main = $("[data-convert-main]"), toggle = $("[data-convert-toggle]"), label = $("[data-convert-label]");
     var pageOk = PAGE.target && opts.some(function (o) { return o.t === PAGE.target; });
@@ -2198,6 +2232,119 @@
     }
     $("[data-convert-caret-text]").hidden = !!pageOk;
     if (!$("[data-convert-list]").hidden) renderConvertList();
+  }
+
+  /* ===========================================================
+     14b. HERRAMIENTAS «UNIR PDF» Y «CREAR PDF»
+     -----------------------------------------------------------
+     En estas páginas no se elige formato: los archivos se ordenan con
+     las flechas y se juntan en UN solo PDF, en el orden de la lista.
+       · merge  → solo PDF (se copian las páginas originales, texto incluido)
+       · build  → imágenes, Word, Excel, PowerPoint y PDF: lo que no es PDF
+                  se convierte primero y después se une todo.
+     El motor pdf-lib 1.17.1 (vendorizado) copia las páginas sin rasterizar.
+     =========================================================== */
+  var MODE = "convert", mergeResult = null;
+
+  function moveJob(job, dir) {
+    var i = jobs.indexOf(job), j = i + dir;
+    if (i < 0 || j < 0 || j >= jobs.length || anyBusy()) return;
+    jobs.splice(i, 1); jobs.splice(j, 0, job);
+    if (dir < 0) listEl.insertBefore(job.el, jobs[j + 1].el);
+    else listEl.insertBefore(job.el, jobs[j - 1].el.nextSibling);
+    mergeResult = null;
+    jobs.forEach(paint);
+    refreshChrome();
+    var b = $(dir < 0 ? "[data-up]" : "[data-down]", job.el);
+    if (b && !b.disabled) b.focus();
+  }
+
+  /* Un archivo cualquiera → bytes de un PDF (los PDF pasan tal cual). */
+  function toPdfBytes(job, report) {
+    var f = job.file, kind = job.kind;
+    if (kind === "pdf") return readAsArrayBuffer(f);
+    var pdfBlob;
+    if (IMAGE_KINDS[kind]) pdfBlob = imagesToPdf([f], report);
+    else pdfBlob = readAsArrayBuffer(f).then(function (buf) {
+      if (kind === "docx") return docxToModel(buf, function (x) { report(x * 0.4); }).then(function (r) { return modelToPdf(r.model, function (x) { report(0.4 + x * 0.6); }); });
+      if (kind === "xlsx") return xlsxToModel(buf, function (x) { report(x * 0.3); }).then(function (r) { return modelToPdf(r.model, function (x) { report(0.3 + x * 0.7); }); });
+      if (kind === "pptx") return pptxToSlides(buf, function (x) { report(x * 0.4); }).then(function (r) { return slidesToPdf(r.slides, function (x) { report(0.4 + x * 0.6); }); });
+      throw UserError("Formato no compatible", "Este archivo no se puede añadir al PDF.");
+    });
+    return pdfBlob.then(readAsArrayBuffer);
+  }
+
+  function runMerge() {
+    if (anyBusy() || !jobs.length) return;
+    if (MODE === "merge" && jobs.length < 2) { toast("info", "Añade al menos 2 PDF", "Para unir necesitas dos o más archivos."); return; }
+    mergeResult = null;
+    jobs.forEach(function (j) { j.state = "queued"; j.progress = 0; j.error = null; j.label = ""; paint(j); });
+    running++;
+    refreshChrome();
+    var label = $("[data-merge-run]");
+    var PDFLib, out, total = jobs.length, i = 0, failed = [];
+    Engines.pdflib().then(function (lib) {
+      PDFLib = lib;
+      return PDFLib.PDFDocument.create();
+    }).then(function (doc) {
+      out = doc;
+      function next() {
+        if (i >= jobs.length) return Promise.resolve();
+        var job = jobs[i++];
+        job.state = "working"; job.label = job.kind === "pdf" ? "Leyendo PDF" : "Convirtiendo a PDF"; job.progress = 0.05; paint(job);
+        if (label) label.innerHTML = '<span class="spinner" aria-hidden="true"></span>Procesando ' + i + " de " + total + "…";
+        var report = function (f) { job.progress = 0.05 + Math.min(0.9, (f || 0) * 0.9); schedulePaint(job); };
+        return toPdfBytes(job, report).then(function (bytes) {
+          job.label = "Añadiendo páginas"; schedulePaint(job);
+          return PDFLib.PDFDocument.load(bytes, { updateMetadata: false });
+        }).then(function (src) {
+          return out.copyPages(src, src.getPageIndices()).then(function (pages) {
+            pages.forEach(function (p) { out.addPage(p); });
+            job.state = "done"; job.progress = 1;
+            job.pages = pages.length;
+            paint(job);
+          });
+        }).catch(function (err) {
+          console.warn("[unir] " + job.file.name, err);
+          var msg = String((err && err.message) || "");
+          job.error = /encrypt/i.test(msg) || (err && err.name === "EncryptedPDFError")
+            ? UserError("PDF protegido con contraseña", "Ábrelo, guárdalo sin contraseña y vuelve a añadirlo.")
+            : humanize(err, job.kind);
+          job.state = "error"; paint(job); failed.push(job);
+        }).then(yieldUI).then(next);
+      }
+      return next();
+    }).then(function () {
+      if (!out.getPageCount()) throw UserError("No se pudo crear el PDF", "Ninguno de los archivos se pudo añadir.");
+      if (label) label.innerHTML = '<span class="spinner" aria-hidden="true"></span>Guardando el PDF…';
+      out.setProducer(BRAND.name); out.setCreator(BRAND.name);
+      return yieldUI().then(function () { return out.save(); });
+    }).then(function (bytes) {
+      var base = baseName(jobs[0].file.name);
+      var name = (MODE === "merge" ? base + "-unido" : base + "-completo") + ".pdf";
+      mergeResult = { blob: new Blob([bytes], { type: MIME.pdf }), name: name, pages: out.getPageCount() };
+      if (failed.length) toast("error", "PDF creado sin " + failed.length + " archivo(s)", "Revisa el mensaje en cada archivo marcado en rojo.");
+      else toast("ok", "¡PDF listo!", mergeResult.pages + " páginas en «" + name + "». Pulsa «Descargar».");
+    }).catch(function (err) {
+      var h = humanize(err, "pdf"); toast("error", h.title, h.detail);
+    }).then(function () {
+      running--;
+      refreshChrome();
+      var dl = $("[data-merge-result]");
+      if (dl && !dl.hidden) try { dl.focus({ preventScroll: true }); } catch (e) { /* sin importancia */ }
+    });
+  }
+
+  /* Partes de la interfaz que cambian en estas dos herramientas */
+  function refreshMergeChrome(busy) {
+    var run = $("[data-merge-run]"), res = $("[data-merge-result]");
+    $(".convert-menu").hidden = true;
+    $("[data-zip-all]").hidden = true;
+    run.hidden = false;
+    run.disabled = busy || !jobs.length || (MODE === "merge" && jobs.length < 2);
+    if (!busy) run.textContent = MODE === "merge" ? "Unir " + jobs.length + " PDF" : "Crear PDF con " + (jobs.length === 1 ? "1 archivo" : jobs.length + " archivos");
+    res.hidden = !mergeResult || busy;
+    if (mergeResult) res.innerHTML = ICON_DOWN + "Descargar PDF <span>(" + mergeResult.pages + " págs. · " + fmtBytes(mergeResult.blob.size) + ")</span>";
   }
 
   /* ===========================================================
@@ -2251,6 +2398,7 @@
     toolCard = $("[data-tool]"); listEl = $("[data-rows]"); convertBar = $("[data-convert-bar]");
     var dz = $("[data-dropzone]"), input = $("[data-file-input]");
     PAGE.target = toolCard.dataset.target || null;
+    MODE = toolCard.dataset.mode || "convert";
     dzTitleHTML = $("[data-dz-title]").innerHTML;
     // Safari no puede crear WebP: en las páginas «a WebP» se avisa con claridad en lugar de fallar.
     if (PAGE.target === "webp" && !canExportWebP) {
@@ -2284,6 +2432,8 @@
       var job = jobOf(e.target);
       if (!job) return;
       if (e.target.closest("[data-remove]")) return removeJob(job);
+      if (e.target.closest("[data-up]")) return moveJob(job, -1);
+      if (e.target.closest("[data-down]")) return moveJob(job, 1);
       if (e.target.closest("[data-unlock]")) {
         var inp = $("[data-pw] input", job.el);
         if (!inp.value) { inp.focus(); return; }
@@ -2307,6 +2457,13 @@
 
     // Botón «Convertir a» y su lista
     $("[data-convert-main]").addEventListener("click", function () { if (PAGE.target) convertAllTo(PAGE.target); });
+    var mr = $("[data-merge-run]"), md = $("[data-merge-result]");
+    if (mr) mr.addEventListener("click", runMerge);
+    if (md) md.addEventListener("click", function () {
+      if (!mergeResult) return;
+      saveBlob(mergeResult.blob, mergeResult.name);
+      afterDownload("Descargando «" + mergeResult.name + "»");
+    });
     $("[data-convert-toggle]").addEventListener("click", function () { setMenuOpen($("[data-convert-list]").hidden); });
     $("[data-convert-list]").addEventListener("click", function (e) {
       var opt = e.target.closest("[data-to]");
@@ -2345,6 +2502,7 @@
       if (anyBusy()) return;
       jobs.forEach(function (j) { if (j.el) j.el.remove(); });
       jobs = [];
+      mergeResult = null;
       setMenuOpen(false);
       refreshChrome();
     });
