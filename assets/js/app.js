@@ -31,7 +31,15 @@
     } catch (e) { /* sin importancia */ }
     return new URL("lib/vendor/", document.baseURI).href;
   })();
-  var BUILD = "20261017";          // Cambia este número en cada publicación (evita versiones viejas en caché)
+  /* Carpeta de scripts propios (office.js vive junto a app.js) */
+  var JS_DIR = (function () {
+    try {
+      var s = document.currentScript && document.currentScript.src;
+      if (s) return new URL("./", s).href;
+    } catch (e) { /* sin importancia */ }
+    return new URL("assets/js/", document.baseURI).href;
+  })();
+  var BUILD = "20261018";          // Cambia este número en cada publicación (evita versiones viejas en caché)
 
   /* ===========================================================
      1. UTILIDADES GENERALES
@@ -243,6 +251,19 @@
     },
     /* Fuente Unicode (Liberation Sans, incluida con pdf.js) para textos con
        caracteres que la fuente estándar del PDF no tiene (griego, cirílico…). */
+    /* Conversión fiel de Word, Excel y PowerPoint (office.js, bajo demanda) */
+    office: function () {
+      return once("office", function () {
+        return loadScript(JS_DIR + "office.js").then(function () {
+          if (!window.CPDFOffice) throw new Error("load office");
+          return window.CPDFOffice({
+            VENDOR: VENDOR, BRAND: BRAND, Engines: Engines, once: once, loadScript: loadScript, yieldUI: yieldUI,
+            UserError: UserError, newPdf: newPdf, WINANSI_G: new RegExp(WINANSI_RE.source, "g"),
+            pdfEngines: function (sample) { return pdfEngines([String(sample || "")]); }
+          });
+        });
+      });
+    },
     unicodeFont: function () {
       return once("unicodeFont", function () {
         var files = { normal: "LiberationSans-Regular.ttf", bold: "LiberationSans-Bold.ttf",
@@ -1811,6 +1832,16 @@
     });
   }
 
+  /* Intenta la conversión fiel (office.js); si el motor falla por algo
+     inesperado, se usa la conversión clásica para no dejar al usuario sin archivo. */
+  function faithful(run, fallback) {
+    return Engines.office().then(run).catch(function (err) {
+      if (err && err.isUser) throw err;
+      console.warn("[conversión fiel] se usa el modo clásico:", err);
+      return fallback();
+    });
+  }
+
   function convertJob(job, report) {
     var kind = job.kind, target = job.target, base = baseName(job.file.name);
     var file = job.file;
@@ -1868,6 +1899,19 @@
 
       // ---------- WORD ----------
       if (kind === "docx") {
+        if (target === "pdf" || target === "jpg" || target === "png") {
+          return faithful(function (O) {
+            if (target === "pdf") return O.docxToPdf(buf, phase(report, 0, 1, "Creando PDF")).then(function (r) {
+              return { blob: r.blob, name: base + ".pdf", note: r.pages + (r.pages === 1 ? " página" : " páginas") };
+            });
+            return O.docxToImages(buf, phase(report, 0, 0.92, "Creando imagen"), MIME[target], 0.92).then(function (pages) {
+              return pagesResult(pages, base, target, phase(report, 0.92, 1, "Empaquetando"));
+            });
+          }, function () { return legacyDocx(buf, base, target, report); });
+        }
+        return legacyDocx(buf, base, target, report);
+      }
+      function legacyDocx(buf, base, target, report) {
         return docxToModel(buf, phase(report, 0, 0.3, "Leyendo Word")).then(function (res) {
           res.model.title = base;
           if (target === "xlsx") return buildXlsx(modelToSheets(res.model), phase(report, 0.3, 1, "Creando Excel")).then(function (blob) { return { blob: blob, name: base + ".xlsx" }; });
@@ -1878,7 +1922,21 @@
       }
 
       // ---------- EXCEL ----------
-      if (kind === "xlsx") {
+      if (kind === "xlsx" && (target === "pdf" || target === "jpg" || target === "png")) {
+        return faithful(function (O) {
+          if (target === "pdf") return O.xlsxToPdf(buf, phase(report, 0, 1, "Creando PDF"), job.file.name).then(function (r) {
+            var bits = [r.pages + (r.pages === 1 ? " página" : " páginas")];
+            if (r.notes.charts) bits.push(r.notes.charts + " gráfico(s) no incluido(s)");
+            if (r.notes.truncated) bits.push("recortado a " + BRAND.limits.maxSheetRows.toLocaleString("es") + " filas por hoja");
+            return { blob: r.blob, name: base + ".pdf", note: bits.join(" · ") };
+          });
+          return O.xlsxToImages(buf, phase(report, 0, 0.92, "Creando imagen"), MIME[target], 0.92, job.file.name).then(function (pages) {
+            return pagesResult(pages, base, target, phase(report, 0.92, 1, "Empaquetando"));
+          });
+        }, function () { return legacyXlsx(); });
+      }
+      if (kind === "xlsx") return legacyXlsx();
+      function legacyXlsx() {
         return xlsxToModel(buf, phase(report, 0, 0.25, "Leyendo Excel")).then(function (res) {
           res.model.title = base;
           var note = res.sheets + (res.sheets === 1 ? " hoja" : " hojas") + (res.truncated ? " · recortado a " + BRAND.limits.maxSheetRows.toLocaleString("es") + " filas por hoja" : "");
@@ -1890,7 +1948,25 @@
       }
 
       // ---------- POWERPOINT ----------
-      if (kind === "pptx") {
+      if (kind === "pptx" && (target === "pdf" || target === "jpg" || target === "png")) {
+        return faithful(function (O) {
+          function noteOf(n, count) {
+            var bits = [count + " diapositivas"];
+            if (n && n.charts) bits.push(n.charts + " gráfico(s) no incluido(s)");
+            if (n && n.skippedImages) bits.push(n.skippedImages + " imagen(es) en formato no compatible");
+            return bits.join(" · ");
+          }
+          if (target === "pdf") return O.pptxToPdf(buf, phase(report, 0, 1, "Creando PDF")).then(function (r) {
+            return { blob: r.blob, name: base + ".pdf", note: noteOf(r.notes, r.pages) };
+          });
+          return O.pptxToImages(buf, phase(report, 0, 0.92, "Creando imagen"), MIME[target], 0.92).then(function (pages) {
+            var n = pages.notes;
+            return pagesResult(pages, base, target, phase(report, 0.92, 1, "Empaquetando")).then(function (r) { r.note = noteOf(n, pages.length); return r; });
+          });
+        }, function () { return legacyPptx(); });
+      }
+      if (kind === "pptx") return legacyPptx();
+      function legacyPptx() {
         return pptxToSlides(buf, phase(report, 0, 0.35, "Leyendo diapositiva")).then(function (res) {
           var bits = [res.slides.length + " diapositivas"];
           if (res.notes.charts) bits.push(res.notes.charts + " gráfico(s) no incluido(s)");
@@ -2266,11 +2342,19 @@
     var pdfBlob;
     if (IMAGE_KINDS[kind]) pdfBlob = imagesToPdf([f], report);
     else pdfBlob = readAsArrayBuffer(f).then(function (buf) {
+      // Conversión fiel (misma que «Word/Excel/PowerPoint a PDF»); si falla, la clásica
+      return faithful(function (O) {
+        var fn = kind === "docx" ? O.docxToPdf : kind === "xlsx" ? O.xlsxToPdf : kind === "pptx" ? O.pptxToPdf : null;
+        if (!fn) throw UserError("Formato no compatible", "Este archivo no se puede añadir al PDF.");
+        return fn(buf, report, f.name).then(function (r) { return r.blob; });
+      }, function () { return legacyToPdf(buf); });
+    });
+    function legacyToPdf(buf) {
       if (kind === "docx") return docxToModel(buf, function (x) { report(x * 0.4); }).then(function (r) { return modelToPdf(r.model, function (x) { report(0.4 + x * 0.6); }); });
       if (kind === "xlsx") return xlsxToModel(buf, function (x) { report(x * 0.3); }).then(function (r) { return modelToPdf(r.model, function (x) { report(0.3 + x * 0.7); }); });
       if (kind === "pptx") return pptxToSlides(buf, function (x) { report(x * 0.4); }).then(function (r) { return slidesToPdf(r.slides, function (x) { report(0.4 + x * 0.6); }); });
       throw UserError("Formato no compatible", "Este archivo no se puede añadir al PDF.");
-    });
+    }
     return pdfBlob.then(readAsArrayBuffer);
   }
 
