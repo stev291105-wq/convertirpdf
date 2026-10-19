@@ -87,7 +87,9 @@
       // Aísla las páginas de los estilos del sitio (modo oscuro, tipografía, etc.)
       css += ".cpdf-render{color:#000;font:16px/normal \"Times New Roman\",\"CPDF Serif\",serif;letter-spacing:normal;text-align:left;-webkit-font-smoothing:auto;}\n" +
         ".cpdf-render *,.cpdf-render *::before,.cpdf-render *::after{box-sizing:content-box;text-wrap:wrap;}\n" +
-        ".cpdf-render img,.cpdf-render svg{display:inline;max-width:none;}\n";
+        ".cpdf-render img,.cpdf-render svg{display:inline;max-width:none;}\n" +
+        // En Word el ancho de una celda INCLUYE sus márgenes internos
+        ".cpdf-render td,.cpdf-render th{box-sizing:border-box;}\n";
       var st = document.createElement("style");
       st.id = "cpdf-fonts"; st.textContent = css;
       document.head.appendChild(st);
@@ -521,6 +523,18 @@
       });
     }
 
+    /* Tablas «flotantes» de Word (con posición): docx-preview las hace flotar a la
+       izquierda y usa la distancia al texto como margen, lo que las corre a la derecha
+       y deja una franja donde se cuela texto. Word las coloca en el margen. */
+    function fixTables(root) {
+      Array.prototype.forEach.call(root.querySelectorAll("table"), function (t) {
+        if (!t.style.cssFloat && !t.style.float) return;
+        t.style.marginLeft = "0"; t.style.marginRight = "0";
+        var parent = t.parentElement, pw = parent ? parent.clientWidth : 0;
+        if (pw && t.offsetWidth >= pw * 0.8) { t.style.cssFloat = "none"; t.style.clear = "both"; }
+      });
+    }
+
     /* Altura de una línea «sencilla» en Word según la fuente (proporción del tamaño).
        Word calcula el interlineado con estas medidas; el navegador no, por eso se ajusta. */
     var LINE = { "calibri": 1.2207, "calibri light": 1.2207, "carlito": 1.2207, "cambria": 1.1724, "caladea": 1.1724,
@@ -653,6 +667,7 @@
         polishDocxStyles(host);
         fixFloatingDrawings(body);
         wordParagraphs(body, host);
+        fixTables(body);
         return settle(host);
       }).then(function () {
         if (onProgress) onProgress(0.15);
@@ -705,8 +720,8 @@
           var cuts = art ? computeCuts(art, Math.max(40, limit)) : [0, 0];
           var bg = cs.backgroundColor;
           if (!bg || bg === "rgba(0, 0, 0, 0)" || bg === "transparent") bg = "#ffffff";
-          for (var k = 0; k < cuts.length - 1; k++) plan.push({ s: s, W: W, H: H, from: cuts[k], to: cuts[k + 1], bg: bg });
-          if (cuts.length < 2) plan.push({ s: s, W: W, H: H, from: 0, to: 0, bg: bg });
+          for (var k = 0; k < cuts.length - 1; k++) plan.push({ s: s, W: W, H: H, from: cuts[k], to: cuts[k + 1], bg: bg, padL: cs.paddingLeft, padR: cs.paddingRight });
+          if (cuts.length < 2) plan.push({ s: s, W: W, H: H, from: 0, to: 0, bg: bg, padL: cs.paddingLeft, padR: cs.paddingRight });
         });
         // Las secciones originales ya no se necesitan en pantalla
         if (!dbg) sections.forEach(function (s) { s.remove(); });
@@ -727,6 +742,12 @@
                 art.appendChild(inner);
                 art.style.height = Math.max(1, pg.to - pg.from) + "px";
                 art.style.flex = "none"; art.style.overflow = "hidden";
+                // El recorte es solo vertical: una tabla o imagen más ancha que el texto
+                // puede invadir el margen (como en Word) sin que se corte su borde.
+                var pl = parseFloat(pg.padL) || 0, pr = parseFloat(pg.padR) || 0;
+                art.style.marginLeft = (-pl) + "px"; art.style.paddingLeft = pl + "px";
+                art.style.marginRight = (-pr) + "px"; art.style.paddingRight = pr + "px";
+                art.style.boxSizing = "content-box";
               }
               // Números de página reales
               var tw = document.createTreeWalker(c, NodeFilter.SHOW_TEXT, null), t;
