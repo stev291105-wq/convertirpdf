@@ -39,7 +39,7 @@
     } catch (e) { /* sin importancia */ }
     return new URL("assets/js/", document.baseURI).href;
   })();
-  var BUILD = "20261018";          // Cambia este número en cada publicación (evita versiones viejas en caché)
+  var BUILD = "20261019";          // Cambia este número en cada publicación (evita versiones viejas en caché)
 
   /* ===========================================================
      1. UTILIDADES GENERALES
@@ -2128,8 +2128,8 @@
     else if (job.state === "error") pct.textContent = "No se pudo añadir";
     else pct.textContent = "Posición " + (pos + 1);
     if (job.state === "error") { note.className = "fnote is-err"; note.textContent = job.error ? job.error.title + ". " + job.error.detail : ""; }
-    else { note.className = "fnote"; note.textContent = job.kind === "pdf" ? "" : "Se convertirá a PDF antes de unirlo"; }
-    pw.hidden = true;
+    else { note.className = "fnote"; note.textContent = job.password && job.state === "ready" ? "🔓 Contraseña lista" : job.kind === "pdf" ? "" : "Se convertirá a PDF antes de unirlo"; }
+    pw.hidden = !(job.state === "error" && job.error && job.error.code === "password");
   }
 
   /* Actualización de progreso agrupada por fotograma (no satura el navegador). */
@@ -2335,6 +2335,60 @@
     if (b && !b.disabled) b.focus();
   }
 
+  /* PDF que pdf-lib no puede copiar tal cual (cifrado con restricciones, con contraseña
+     o con estructura dañada): pdf.js lo abre y se rehace cada página como imagen nítida
+     con su texto invisible encima (se puede seleccionar y buscar). */
+  function rebuildPdf(bytes, password, report) {
+    var pdf, doc = null, n = 0;
+    return openPdf(new Uint8Array(bytes.slice ? bytes.slice(0) : bytes), password).then(function (p) {
+      pdf = p;
+      return Engines.jspdf();
+    }).then(function (jsPDF) {
+      function step() {
+        if (n >= pdf.numPages) return Promise.resolve();
+        n++;
+        return pdf.getPage(n).then(function (page) {
+          var vp1 = page.getViewport({ scale: 1 });
+          var scale = Math.min(2, 3000 / Math.max(vp1.width, vp1.height));
+          var vp = page.getViewport({ scale: scale });
+          var c = document.createElement("canvas");
+          c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+          var ctx = c.getContext("2d");
+          ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, c.width, c.height);
+          return page.render({ canvasContext: ctx, viewport: vp, background: "#FFFFFF" }).promise.then(function () {
+            return page.getTextContent().catch(function () { return { items: [] }; });
+          }).then(function (tc) {
+            var w = vp1.width, h = vp1.height, orient = w > h ? "landscape" : "portrait";
+            if (!doc) doc = new jsPDF({ unit: "pt", format: [w, h], orientation: orient, compress: true });
+            else doc.addPage([w, h], orient);
+            doc.addImage(c.toDataURL("image/jpeg", 0.88), "JPEG", 0, 0, w, h, undefined, "FAST");
+            c.width = c.height = 0;
+            doc.setFont("helvetica", "normal");
+            (tc.items || []).forEach(function (it) {
+              if (!it.str || !/\S/.test(it.str)) return;
+              var m = vp1.transform, q = it.transform;
+              var t = [m[0] * q[0] + m[2] * q[1], m[1] * q[0] + m[3] * q[1], m[0] * q[2] + m[2] * q[3], m[1] * q[2] + m[3] * q[3],
+                m[0] * q[4] + m[2] * q[5] + m[4], m[1] * q[4] + m[3] * q[5] + m[5]];
+              var size = Math.hypot(t[2], t[3]) || 10, str = it.str.replace(new RegExp(WINANSI_RE.source, "g"), "?");
+              try {
+                doc.setFontSize(size);
+                var nat = doc.getTextWidth(str), hs = nat > 0 && it.width ? Math.max(0.2, Math.min(5, it.width / nat)) : 1;
+                doc.text(str, t[4], t[5], { renderingMode: "invisible", horizontalScale: hs, baseline: "alphabetic" });
+              } catch (e) { /* sin importancia */ }
+            });
+            page.cleanup();
+            if (report) report(0.1 + 0.85 * n / pdf.numPages);
+          });
+        }).then(yieldUI).then(step);
+      }
+      return step();
+    }).then(function () {
+      closePdf(pdf);
+      if (!doc) throw UserError("El PDF está vacío", "No tiene páginas que añadir.");
+      return doc.output("arraybuffer");
+    }, function (e) { if (pdf) closePdf(pdf); throw e; });
+  }
+
   /* Un archivo cualquiera → bytes de un PDF (los PDF pasan tal cual). */
   function toPdfBytes(job, report) {
     var f = job.file, kind = job.kind;
@@ -2378,22 +2432,29 @@
         job.state = "working"; job.label = job.kind === "pdf" ? "Leyendo PDF" : "Convirtiendo a PDF"; job.progress = 0.05; paint(job);
         if (label) label.innerHTML = '<span class="spinner" aria-hidden="true"></span>Procesando ' + i + " de " + total + "…";
         var report = function (f) { job.progress = 0.05 + Math.min(0.9, (f || 0) * 0.9); schedulePaint(job); };
+        function copyFrom(bytes) {
+          return PDFLib.PDFDocument.load(bytes, { updateMetadata: false }).then(function (src) {
+            return out.copyPages(src, src.getPageIndices());
+          });
+        }
         return toPdfBytes(job, report).then(function (bytes) {
           job.label = "Añadiendo páginas"; schedulePaint(job);
-          return PDFLib.PDFDocument.load(bytes, { updateMetadata: false });
-        }).then(function (src) {
-          return out.copyPages(src, src.getPageIndices()).then(function (pages) {
-            pages.forEach(function (p) { out.addPage(p); });
-            job.state = "done"; job.progress = 1;
-            job.pages = pages.length;
-            paint(job);
+          return copyFrom(bytes).catch(function (err) {
+            // PDF con restricciones (se abre sin clave pero está cifrado), con clave de
+            // apertura o con estructura dañada: se reconstruye página por página con pdf.js.
+            if (job.kind !== "pdf") throw err;
+            console.warn("[unir] se reconstruye " + job.file.name + ":", err && err.message);
+            job.label = "Reconstruyendo páginas"; job.rebuilt = true; schedulePaint(job);
+            return rebuildPdf(bytes, job.password, report).then(copyFrom);
           });
+        }).then(function (pages) {
+          pages.forEach(function (p) { out.addPage(p); });
+          job.state = "done"; job.progress = 1;
+          job.pages = pages.length;
+          paint(job);
         }).catch(function (err) {
           console.warn("[unir] " + job.file.name, err);
-          var msg = String((err && err.message) || "");
-          job.error = /encrypt/i.test(msg) || (err && err.name === "EncryptedPDFError")
-            ? UserError("PDF protegido con contraseña", "Ábrelo, guárdalo sin contraseña y vuelve a añadirlo.")
-            : humanize(err, job.kind);
+          job.error = humanize(err, job.kind);
           job.state = "error"; paint(job); failed.push(job);
         }).then(yieldUI).then(next);
       }
@@ -2402,7 +2463,14 @@
       if (!out.getPageCount()) throw UserError("No se pudo crear el PDF", "Ninguno de los archivos se pudo añadir.");
       if (label) label.innerHTML = '<span class="spinner" aria-hidden="true"></span>Guardando el PDF…';
       out.setProducer(BRAND.name); out.setCreator(BRAND.name);
-      return yieldUI().then(function () { return out.save(); });
+      var expected = out.getPageCount();
+      return yieldUI().then(function () { return out.save(); }).then(function (bytes) {
+        // Comprobación final: el PDF resultante se vuelve a abrir y debe tener todas las páginas
+        return PDFLib.PDFDocument.load(bytes, { updateMetadata: false }).then(function (chk) {
+          if (chk.getPageCount() !== expected) throw UserError("No se pudo crear el PDF", "El archivo resultante no salió completo. Vuelve a intentarlo.");
+          return bytes;
+        });
+      });
     }).then(function (bytes) {
       var base = baseName(jobs[0].file.name);
       var name = (MODE === "merge" ? base + "-unido" : base + "-completo") + ".pdf";

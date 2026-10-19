@@ -433,9 +433,92 @@
         if (/^\s*["']?(Symbol|Wingdings|Webdings)/i.test(ff)) el.style.fontFamily = "";
         else if (ff) el.style.fontFamily = fontStack(ff);
       });
+      // Imágenes «delante/detrás del texto» (marcas de agua, logos del membrete): docx-preview
+      // las mete en una caja de 0×0 alineada a la línea base, y la imagen estiraba la línea
+      // hasta cientos de píxeles (el contenido bajaba y el documento se partía en decenas de
+      // páginas). Se alinean arriba para que no ocupen espacio en el texto, como en Word.
+      Array.prototype.forEach.call(host.querySelectorAll("div[style*='inline-block'], div[style*='position: relative']"), function (d) {
+        var st = d.style;
+        if ((st.width === "0px" || st.height === "0px") && (st.position === "relative" || st.display === "inline-block")) {
+          st.verticalAlign = "top"; st.lineHeight = "0"; st.overflow = "visible";
+        }
+      });
       // Símbolos sueltos dentro del texto (casillas, flechas de Wingdings…)
       var walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT, null), n;
       while ((n = walker.nextNode())) if (/[-]/.test(n.nodeValue)) n.nodeValue = fixPua(n.nodeValue);
+    }
+
+    /* Imágenes y formas «flotantes» (marca de agua, logotipos del membrete, cuadros
+       de texto): en Word NO ocupan espacio. docx-preview las mete en una caja de
+       tamaño 0 que, en algunos navegadores, alinea su línea base con el borde inferior
+       de la imagen y empuja el texto cientos de píxeles hacia abajo. Se sacan del flujo. */
+    function fixFloatingDrawings(root) {
+      Array.prototype.forEach.call(root.querySelectorAll("div, span"), function (d) {
+        var st = d.style;
+        if (st.width !== "0px" || st.height !== "0px") return;
+        st.verticalAlign = "top"; st.lineHeight = "0"; st.overflow = "visible";
+        if (!st.position || st.position === "static") st.position = "relative";
+        Array.prototype.forEach.call(d.children, function (c) {
+          var p = c.style.position;
+          if (!p || p === "relative" || p === "static") {
+            c.style.position = "absolute";
+            if (!c.style.left) c.style.left = "0";
+            if (!c.style.top) c.style.top = "0";
+          }
+        });
+      });
+      // Cuadros de texto VML (Word los guarda así para compatibilidad): docx-preview los
+      // dibuja como <svg><foreignObject>, que pierde fuentes y colores y recorta el texto.
+      // Se convierten en cajas HTML normales, en la misma posición y tamaño.
+      Array.prototype.forEach.call(root.querySelectorAll("svg"), function (svg) {
+        var fo = svg.querySelector("foreignObject");
+        if (!fo || !/\S/.test(fo.textContent || "")) return;
+        var box = document.createElement("div");
+        var st = svg.getAttribute("style") || "";
+        // Solo propiedades de posición y tamaño (las «mso-…» no son CSS)
+        st.split(";").forEach(function (decl) {
+          var i = decl.indexOf(":");
+          if (i < 0) return;
+          var k = decl.slice(0, i).trim().toLowerCase(), v = decl.slice(i + 1).trim();
+          if (/^(position|margin-left|margin-top|left|top|width|height|z-index|rotation)$/.test(k) && k !== "rotation") box.style.setProperty(k, k === "z-index" ? "auto" : v);
+        });
+        if (!box.style.position) box.style.position = "relative";
+        box.style.boxSizing = "border-box";
+        box.style.padding = "3.6pt 7.2pt";   // márgenes internos por defecto de un cuadro de texto de Word
+        box.style.overflow = "visible";
+        box.style.lineHeight = "normal";
+        while (fo.firstChild) box.appendChild(fo.firstChild);
+        svg.parentNode.replaceChild(box, svg);
+        // La posición del cuadro se mide desde el inicio del párrafo (como en Word),
+        // no desde el lugar donde el navegador lo dejaría dentro de la línea.
+        var holder = box.parentElement, para = box.closest("p");
+        if (holder && holder.tagName === "DIV" && !holder.style.position && para) {
+          holder.style.position = "absolute"; holder.style.left = "0"; holder.style.top = "0";
+          holder.style.width = "0"; holder.style.height = "0"; holder.style.lineHeight = "0";
+          if (getComputedStyle(para).position === "static") para.style.position = "relative";
+        }
+      });
+      // Líneas y formas VML: misma regla (posición desde el inicio del párrafo)
+      Array.prototype.forEach.call(root.querySelectorAll("svg"), function (svg) {
+        if (svg.style.position !== "absolute") return;
+        // Una línea VML no trae tamaño: se deja ver completa
+        // (se le da el tamaño justo para contenerla: el dibujo de la página recorta lo que sobresale)
+        if (!svg.style.width) {
+          var mx = 1, my = 1;
+          Array.prototype.forEach.call(svg.querySelectorAll("line"), function (l) {
+            mx = Math.max(mx, pxFromCss(l.getAttribute("x1")), pxFromCss(l.getAttribute("x2")));
+            my = Math.max(my, pxFromCss(l.getAttribute("y1")), pxFromCss(l.getAttribute("y2")));
+          });
+          svg.style.width = (mx + 2) + "px"; svg.style.height = (my + 2) + "px"; svg.style.overflow = "visible";
+        }
+        Array.prototype.forEach.call(svg.querySelectorAll("line"), function (l) { if (!l.getAttribute("stroke") || l.getAttribute("stroke") === "null") l.setAttribute("stroke", "#000"); });
+        var host = svg.parentElement, para = svg.closest("p");
+        if (host && host.tagName === "DIV" && !host.style.position && para) {
+          host.style.position = "absolute"; host.style.left = "0"; host.style.top = "0";
+          host.style.width = "0"; host.style.height = "0"; host.style.lineHeight = "0";
+          if (getComputedStyle(para).position === "static") para.style.position = "relative";
+        }
+      });
     }
 
     /* Altura de una línea «sencilla» en Word según la fuente (proporción del tamaño).
@@ -568,12 +651,22 @@
         });
       }).then(function () {
         polishDocxStyles(host);
+        fixFloatingDrawings(body);
         wordParagraphs(body, host);
         return settle(host);
       }).then(function () {
         if (onProgress) onProgress(0.15);
         var sections = Array.prototype.slice.call(body.querySelectorAll(":scope > section.docx"));
         if (!sections.length) throw K.UserError("El documento está vacío", "No se encontró contenido para convertir.");
+        // Páginas vacías falsas: cuando un párrafo tiene «salto de página anterior» y además
+        // la marca de salto que guardó Word, docx-preview corta dos veces y deja una página
+        // en blanco. Se quitan las secciones sin contenido (si no es la única).
+        sections = sections.filter(function (s, idx) {
+          var art = s.querySelector(":scope > article");
+          var empty = art && !/\S/.test(art.textContent || "") && !art.querySelector("img, svg, table, canvas, hr, image");
+          if (empty && sections.length > 1) { s.remove(); return false; }
+          return true;
+        });
         var plan = [];
         // Como Word, no se deja el «espacio anterior» del primer párrafo al inicio de una página nueva
         sections.forEach(function (s, idx) {
@@ -586,8 +679,29 @@
           var W = s.offsetWidth;
           var H = pxFromCss(s.style.minHeight) || s.offsetHeight;
           var art = s.querySelector(":scope > article");
-          var padB = parseFloat(cs.paddingBottom) || 0;
-          var limit = art ? H - padB - art.offsetTop : H;
+          var hd = s.querySelector(":scope > header"), ft = s.querySelector(":scope > footer");
+          var padT = parseFloat(cs.paddingTop) || 0, padB = parseFloat(cs.paddingBottom) || 0;
+          var normal = H - padT - padB;   // alto del cuerpo según los márgenes de la página
+          // Seguro: un encabezado o pie no puede quitarle al texto más de lo razonable.
+          // Si lo hace (objeto mal medido), se dibuja encima sin desplazar el contenido.
+          if (art && hd && art.offsetTop > padT + normal * 0.35) {
+            hd.style.position = "absolute"; hd.style.left = cs.paddingLeft; hd.style.right = cs.paddingRight;
+            hd.style.top = Math.max(0, padT + (parseFloat(getComputedStyle(hd).marginTop) || 0)) + "px"; hd.style.marginTop = "0";
+          }
+          var footReach = 0;
+          if (ft) {
+            var fcs = getComputedStyle(ft), fd = padB + (parseFloat(fcs.marginBottom) || 0);
+            footReach = fd + ft.offsetHeight;
+            if (footReach - padB > normal * 0.35) {
+              ft.style.position = "absolute"; ft.style.left = cs.paddingLeft; ft.style.right = cs.paddingRight;
+              ft.style.bottom = Math.max(0, fd) + "px"; ft.style.marginBottom = "0";
+              footReach = 0;
+            }
+          }
+          // Como Word: el texto termina donde empieza el pie si este invade el margen inferior
+          var bodyBottom = H - Math.max(padB, footReach);
+          var limit = art ? bodyBottom - art.offsetTop : H;
+          if (limit < normal * 0.5) limit = normal;
           var cuts = art ? computeCuts(art, Math.max(40, limit)) : [0, 0];
           var bg = cs.backgroundColor;
           if (!bg || bg === "rgba(0, 0, 0, 0)" || bg === "transparent") bg = "#ffffff";
